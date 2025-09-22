@@ -59,4 +59,5 @@ Join the TestFlight Beta waitlist to get early access and lifetime benefits.
 
 Healify — your health, simplified and personalized.
 
-[1](https://www.healify.ai)
+https://www.healify.ai
+support@healify.ai
