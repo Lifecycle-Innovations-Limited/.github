@@ -114,28 +114,69 @@ jobs:
               print("overrides block empty — nothing to verify")
               sys.exit(0)
 
+          def nums(v):
+              out = []
+              for part in re.split(r"[.\-+]", v):
+                  if part.isdigit():
+                      out.append(int(part))
+                  else:
+                      break
+              while len(out) < 3:
+                  out.append(0)
+              return out[:3]
+
           failures = []
+          verified = 0
           for name, spec in entries:
-              # scoped selectors like tailwindcss>nanoid: verify the target package
-              target = name.split(">")[-1]
-              m2 = re.search(r"(?m)^\s{2}%s@([^\s:(]+):" % re.escape(target), lock)
+              # selectors like tailwindcss>nanoid or tailwindcss>@scope/pkg
+              target = name.split(">")[-1].strip()
+              # pnpm-lock v9 quotes scoped keys: '@babel/core@7.24.0':
+              m2 = re.search(
+                  r"(?m)^\s{2}'?%s@([^\s:'(]+)'?:" % re.escape(target), lock
+              )
               if not m2:
-                  print(f"  ? {name} -> {spec}: {target} not present in lockfile (may be optional)")
+                  print(f"  SKIP {name} -> {spec}: {target} not present in pnpm-lock.yaml, override NOT verified")
                   continue
               resolved = m2.group(1)
               print(f"  {target} resolved to {resolved} (override {spec})")
 
-              mv = re.match(r">=\s*([0-9][0-9.]*)", spec)
+              s = spec.strip()
+              mv = re.match(r"^>=\s*([0-9][0-9.]*)$", s)
+              exact = re.match(r"^=?\s*([0-9]+(?:\.[0-9]+){0,2}(?:[-+][0-9A-Za-z.\-]+)?)$", s)
+              caret = re.match(r"^\^\s*([0-9]+(?:\.[0-9]+){0,2})$", s)
+              tilde = re.match(r"^~\s*([0-9]+(?:\.[0-9]+){0,2})$", s)
               if mv:
-                  want = [int(x) for x in mv.group(1).split(".")]
-                  got = []
-                  for part in re.split(r"[.\-+]", resolved):
-                      if part.isdigit():
-                          got.append(int(part))
-                      else:
-                          break
-                  if got and got < want:
+                  if nums(resolved) < nums(mv.group(1)):
                       failures.append(f"{target}: lockfile has {resolved}, override requires {spec}")
+                  else:
+                      verified += 1
+              elif exact:
+                  want = exact.group(1)
+                  if resolved != want and nums(resolved) != nums(want):
+                      failures.append(f"{target}: lockfile has {resolved}, override pins exactly {want}")
+                  else:
+                      verified += 1
+              elif caret or tilde:
+                  base = (caret or tilde).group(1)
+                  lo = nums(base)
+                  got = nums(resolved)
+                  if caret:
+                      hi = [lo[0] + 1, 0, 0] if lo[0] > 0 else ([0, lo[1] + 1, 0] if lo[1] > 0 else [0, 0, lo[2] + 1])
+                  else:
+                      hi = [lo[0], lo[1] + 1, 0]
+                  if not (lo <= got < hi):
+                      failures.append(f"{target}: lockfile has {resolved}, override requires {spec}")
+                  else:
+                      verified += 1
+              else:
+                  failures.append(
+                      f"{target}: override spec {spec!r} is not a comparable version range "
+                      f"(alias/catalog/file/tag) — this check cannot confirm it applied"
+                  )
+
+          if entries and verified == 0 and not failures:
+              print("::error title=override guard verified nothing::none of the declared overrides could be checked against pnpm-lock.yaml")
+              sys.exit(1)
 
           if failures:
               print("::error title=override declared but not applied::" + "; ".join(failures))
