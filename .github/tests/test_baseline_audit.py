@@ -12,7 +12,6 @@ Run: python3 .github/tests/test_baseline_audit.py
 from __future__ import annotations
 
 import ast
-import os
 import subprocess
 import sys
 import tempfile
@@ -64,13 +63,12 @@ def run_audit(workflows, strict=False):
             (target / name).write_text(body, encoding="utf-8")
         summary = Path(tmp, "summary.md")
         summary.touch()
-        # Deliberately not os.environ: the script under test is read out of a
-        # workflow file that a pull request can modify, so it is given only the
-        # two variables it reads and nothing else to disclose.
+        # Deliberately not the inherited environment: the script under test is
+        # read out of a workflow file that a pull request can modify, so it gets
+        # only the two variables it reads and nothing else to disclose.
         env = {
             "STRICT": "true" if strict else "false",
             "GITHUB_STEP_SUMMARY": str(summary),
-            "PATH": os.environ.get("PATH", ""),
         }
         proc = subprocess.run(
             [sys.executable, "-c", audit_source()],
