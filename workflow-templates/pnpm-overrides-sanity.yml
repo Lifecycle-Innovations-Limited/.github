@@ -1,0 +1,146 @@
+name: pnpm overrides sanity
+
+# Why this exists
+#
+# pnpm 10 STOPPED reading the `pnpm` field from package.json. It prints
+#   "The pnpm field in package.json is no longer read by pnpm"
+# and then IGNORES `pnpm.overrides` / `pnpm.patchedDependencies` entirely.
+#
+# The failure is silent and security-relevant: a security override declared in
+# package.json under pnpm 10 looks committed and reviewed, resolves nothing, and
+# the advisory stays open. This is exactly how critical `tar` GHSA-23hp-3jrh-7fpw
+# survived multiple dependency bumps in two repos (2026-08-12).
+#
+# This reusable workflow fails when a repo pins pnpm >= 10 and still declares
+# overrides/patchedDependencies in package.json, and it verifies that every
+# override actually took effect in the lockfile.
+
+on:
+  workflow_call:
+    inputs:
+      working-directory:
+        description: Directory containing package.json
+        required: false
+        default: "."
+        type: string
+
+jobs:
+  pnpm-overrides-sanity:
+    name: pnpm overrides are actually read
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Check overrides live where pnpm 10 reads them
+        working-directory: ${{ inputs.working-directory }}
+        run: |
+          set -euo pipefail
+
+          if [ ! -f package.json ]; then
+            echo "no package.json in ${{ inputs.working-directory }} — nothing to check"
+            exit 0
+          fi
+
+          pm=$(node -p "require('./package.json').packageManager || ''" 2>/dev/null || echo "")
+          echo "packageManager: ${pm:-<unset>}"
+
+          # Only pnpm repos are in scope
+          case "$pm" in
+            pnpm@*) ;;
+            *) echo "not a pnpm-pinned repo — skipping"; exit 0 ;;
+          esac
+
+          major=$(printf '%s' "$pm" | sed -E 's/^pnpm@([0-9]+).*/\1/')
+          echo "pnpm major: $major"
+
+          has_field=$(node -p "const p=require('./package.json'); (p.pnpm && Object.keys(p.pnpm).length) ? 'yes' : 'no'")
+          # Keys pnpm 10 still honours in package.json vs the ones it drops
+          dropped=$(node -p "
+            const p=require('./package.json').pnpm || {};
+            const dead=['overrides','patchedDependencies','peerDependencyRules','packageExtensions'];
+            Object.keys(p).filter(k=>dead.includes(k)).join(',') || 'none'
+          ")
+
+          if [ "$major" -ge 10 ] && [ "$dropped" != "none" ]; then
+            echo "::error title=pnpm 10 ignores these::package.json has pnpm.{$dropped} but pnpm $major does NOT read them."
+            echo ""
+            echo "Move them to pnpm-workspace.yaml, e.g.:"
+            echo ""
+            echo "  overrides:"
+            echo "    some-pkg: '>=1.2.3'"
+            echo ""
+            echo "Leaving them in package.json makes security overrides SILENTLY INERT:"
+            echo "the advisory stays open while the diff looks correct."
+            exit 1
+          fi
+
+          echo "OK: no silently-ignored pnpm config (field present: $has_field, dropped keys: $dropped)"
+
+      - name: Verify declared overrides took effect in the lockfile
+        working-directory: ${{ inputs.working-directory }}
+        run: |
+          set -euo pipefail
+
+          if [ ! -f pnpm-workspace.yaml ] || [ ! -f pnpm-lock.yaml ]; then
+            echo "no pnpm-workspace.yaml + pnpm-lock.yaml pair — skipping"
+            exit 0
+          fi
+
+          python3 - <<'PY'
+          import re, sys, pathlib
+
+          ws = pathlib.Path("pnpm-workspace.yaml").read_text()
+          lock = pathlib.Path("pnpm-lock.yaml").read_text()
+
+          # crude but dependency-free: read the overrides: block
+          m = re.search(r"(?m)^overrides:\s*$((?:\n[ \t]+.*|\n\s*)*)", ws)
+          if not m:
+              print("no overrides block in pnpm-workspace.yaml — nothing to verify")
+              sys.exit(0)
+
+          entries = []
+          for line in m.group(1).splitlines():
+              s = line.strip()
+              if not s or s.startswith("#"):
+                  continue
+              if ":" not in s:
+                  continue
+              name, spec = s.split(":", 1)
+              entries.append((name.strip().strip("'\""), spec.strip().strip("'\"")))
+
+          if not entries:
+              print("overrides block empty — nothing to verify")
+              sys.exit(0)
+
+          failures = []
+          for name, spec in entries:
+              # scoped selectors like tailwindcss>nanoid: verify the target package
+              target = name.split(">")[-1]
+              m2 = re.search(r"(?m)^\s{2}%s@([^\s:(]+):" % re.escape(target), lock)
+              if not m2:
+                  print(f"  ? {name} -> {spec}: {target} not present in lockfile (may be optional)")
+                  continue
+              resolved = m2.group(1)
+              print(f"  {target} resolved to {resolved} (override {spec})")
+
+              mv = re.match(r">=\s*([0-9][0-9.]*)", spec)
+              if mv:
+                  want = [int(x) for x in mv.group(1).split(".")]
+                  got = []
+                  for part in re.split(r"[.\-+]", resolved):
+                      if part.isdigit():
+                          got.append(int(part))
+                      else:
+                          break
+                  if got and got < want:
+                      failures.append(f"{target}: lockfile has {resolved}, override requires {spec}")
+
+          if failures:
+              print("::error title=override declared but not applied::" + "; ".join(failures))
+              print("Run: pnpm install --lockfile-only  (and commit pnpm-lock.yaml)")
+              sys.exit(1)
+
+          print("OK: all declared overrides are reflected in pnpm-lock.yaml")
+          PY
