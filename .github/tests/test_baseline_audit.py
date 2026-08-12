@@ -25,6 +25,9 @@ import yaml
 REPO_ROOT = Path(__file__).resolve().parents[2]
 WORKFLOW = REPO_ROOT / ".github/workflows/organization-pr-baseline.yml"
 AUDIT_STEP = "Audit workflow structure"
+# A detector regression should fail fast and point at the subprocess, not
+# hang until the CI job timeout.
+AUDIT_TIMEOUT_SECONDS = 60
 
 
 def audit_source() -> str:
@@ -61,10 +64,13 @@ def run_audit(workflows, strict=False):
             (target / name).write_text(body, encoding="utf-8")
         summary = Path(tmp, "summary.md")
         summary.touch()
+        # Deliberately not os.environ: the script under test is read out of a
+        # workflow file that a pull request can modify, so it is given only the
+        # two variables it reads and nothing else to disclose.
         env = {
-            **os.environ,
             "STRICT": "true" if strict else "false",
             "GITHUB_STEP_SUMMARY": str(summary),
+            "PATH": os.environ.get("PATH", ""),
         }
         proc = subprocess.run(
             [sys.executable, "-c", audit_source()],
@@ -72,6 +78,7 @@ def run_audit(workflows, strict=False):
             env=env,
             capture_output=True,
             text=True,
+            timeout=AUDIT_TIMEOUT_SECONDS,
         )
         return AuditResult(
             proc.returncode,

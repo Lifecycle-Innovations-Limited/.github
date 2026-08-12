@@ -17,6 +17,7 @@ on:
     branches: [main]
     paths:
       - ".github/workflows/organization-pr-baseline.yml"
+      - ".github/workflows/baseline-selftest.yml"
       - ".github/tests/**"
 
 permissions:
