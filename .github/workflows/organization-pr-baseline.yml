@@ -1,0 +1,106 @@
+name: Organization PR Baseline
+
+# HEA-7249: reusable, read-only validation for pull requests across Healify.
+# Roll this out through callers first. Do not make it an organization-required
+# workflow until representative repositories have completed a green trial.
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/**"
+  workflow_call:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: organization-pr-baseline-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  ACTIONLINT_VERSION: 1.7.12
+  ACTIONLINT_SHA256: 8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8
+  GITLEAKS_VERSION: 8.30.1
+  GITLEAKS_SHA256: 551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb
+
+jobs:
+  validate:
+    name: Organization PR Baseline
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Check out the exact commit without retaining credentials
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Install checksum-pinned validation tools
+        env:
+          GH_HOST: github.com
+        run: |
+          set -euo pipefail
+          install -d "$RUNNER_TEMP/bin"
+
+          curl --fail --silent --show-error --location \
+            "https://${GH_HOST}/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz" \
+            --output "$RUNNER_TEMP/actionlint.tar.gz"
+          echo "${ACTIONLINT_SHA256}  $RUNNER_TEMP/actionlint.tar.gz" | sha256sum --check --strict
+          tar -xzf "$RUNNER_TEMP/actionlint.tar.gz" -C "$RUNNER_TEMP/bin" actionlint
+
+          curl --fail --silent --show-error --location \
+            "https://${GH_HOST}/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" \
+            --output "$RUNNER_TEMP/gitleaks.tar.gz"
+          echo "${GITLEAKS_SHA256}  $RUNNER_TEMP/gitleaks.tar.gz" | sha256sum --check --strict
+          tar -xzf "$RUNNER_TEMP/gitleaks.tar.gz" -C "$RUNNER_TEMP/bin" gitleaks
+          echo "$RUNNER_TEMP/bin" >>"$GITHUB_PATH"
+
+      - name: Validate GitHub Actions workflows
+        run: |
+          set -euo pipefail
+          mapfile -d '' workflows < <(find .github/workflows -maxdepth 1 -type f \
+            \( -name '*.yml' -o -name '*.yaml' \) -print0 2>/dev/null || true)
+          if [ "${#workflows[@]}" -eq 0 ]; then
+            echo "::notice::No GitHub Actions workflow files found."
+          else
+            actionlint "${workflows[@]}"
+          fi
+
+      - name: Reject placeholder CI Summary gates
+        shell: python
+        run: |
+          from pathlib import Path
+          import re
+          import sys
+
+          placeholder = re.compile(
+              r"run:\s*(?:[>|][-+]?\s*\n\s*)?echo\s+[\"']?CI checks passed",
+              re.IGNORECASE,
+          )
+          failures = []
+          for pattern in ("*.yml", "*.yaml"):
+              for path in Path(".github/workflows").glob(pattern):
+                  text = path.read_text(encoding="utf-8")
+                  if re.search(r"name:\s*CI Summary\b", text) and placeholder.search(text):
+                      failures.append(path)
+
+          if failures:
+              for path in failures:
+                  print(
+                      f"::error file={path}::CI Summary must aggregate real tests; "
+                      "an unconditional echo is not a merge gate."
+                  )
+              sys.exit(1)
+
+      - name: Scan the pull-request range for committed secrets
+        env:
+          BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+          HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          set -euo pipefail
+          if [ -n "${BASE:-}" ] && [ "$BASE" != "0000000000000000000000000000000000000000" ] \
+             && git rev-parse --verify "$BASE^{commit}" >/dev/null 2>&1; then
+            gitleaks git --log-opts="${BASE}..${HEAD}" --no-banner --verbose --redact
+          else
+            gitleaks git --no-banner --verbose --redact
+          fi
