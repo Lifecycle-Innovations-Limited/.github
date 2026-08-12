@@ -1,0 +1,275 @@
+name: Organization PR Baseline
+
+# HEA-7249: reusable, read-only validation for pull requests across Healify.
+# Roll this out through callers first. Do not make it an organization-required
+# workflow until representative repositories have completed a green trial.
+#
+# Two tiers, deliberately:
+#   blocking  - syntax, committed secrets, and fake merge gates. Already clean
+#               across the fleet, so turning these on breaks nobody.
+#   advisory  - action pinning, permissions, job timeouts, secret handling.
+#               A 2026-08-12 audit of 216 workflows found 561/657 external
+#               action references on mutable tags, 84 workflows with no
+#               permissions block, and 182/309 jobs with no timeout. Failing
+#               on those today would red-line every repository at once, so they
+#               annotate until a repository opts in with strict: true.
+
+on:
+  # No paths filter: the secret scan must see every pull request, not only the
+  # ones that happen to touch a workflow file.
+  pull_request:
+  workflow_call:
+    inputs:
+      strict:
+        description: "Fail the job on advisory findings (pinning, permissions, timeouts, secret handling)."
+        type: boolean
+        default: false
+      scan-timeout-minutes:
+        description: "Job timeout. Raise for repositories with long history; the fallback secret scan walks all commits."
+        type: number
+        default: 20
+
+permissions:
+  contents: read
+
+concurrency:
+  group: organization-pr-baseline-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  # Only cancel superseded pull-request runs. On branch pushes each commit keeps
+  # its own secret scan, so a rapid series of pushes cannot leave a commit
+  # unscanned behind a cancelled run.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  ACTIONLINT_VERSION: 1.7.12
+  ACTIONLINT_SHA256: 8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8
+  GITLEAKS_VERSION: 8.30.1
+  GITLEAKS_SHA256: 551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb
+
+jobs:
+  validate:
+    name: Organization PR Baseline
+    runs-on: ubuntu-24.04
+    timeout-minutes: ${{ inputs.scan-timeout-minutes || 20 }}
+    steps:
+      - name: Check out the exact commit without retaining credentials
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Install checksum-pinned validation tools
+        env:
+          DOWNLOAD_HOST: github.com
+        run: |
+          set -euo pipefail
+          install -d "$RUNNER_TEMP/bin"
+
+          curl --fail --silent --show-error --location --retry 3 --retry-delay 2 \
+            "https://${DOWNLOAD_HOST}/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz" \
+            --output "$RUNNER_TEMP/actionlint.tar.gz"
+          echo "${ACTIONLINT_SHA256}  $RUNNER_TEMP/actionlint.tar.gz" | sha256sum --check --strict
+          tar -xzf "$RUNNER_TEMP/actionlint.tar.gz" -C "$RUNNER_TEMP/bin" actionlint
+
+          curl --fail --silent --show-error --location --retry 3 --retry-delay 2 \
+            "https://${DOWNLOAD_HOST}/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" \
+            --output "$RUNNER_TEMP/gitleaks.tar.gz"
+          echo "${GITLEAKS_SHA256}  $RUNNER_TEMP/gitleaks.tar.gz" | sha256sum --check --strict
+          tar -xzf "$RUNNER_TEMP/gitleaks.tar.gz" -C "$RUNNER_TEMP/bin" gitleaks
+          echo "$RUNNER_TEMP/bin" >>"$GITHUB_PATH"
+
+      - name: Validate GitHub Actions workflows
+        run: |
+          set -euo pipefail
+          mapfile -d '' workflows < <(find .github/workflows -maxdepth 1 -type f \
+            \( -name '*.yml' -o -name '*.yaml' \) -print0 2>/dev/null || true)
+          if [ "${#workflows[@]}" -eq 0 ]; then
+            echo "::notice::No GitHub Actions workflow files found."
+          else
+            echo "Linting ${#workflows[@]} workflow file(s) with actionlint ${ACTIONLINT_VERSION}."
+            actionlint "${workflows[@]}"
+          fi
+
+      # The audit parses workflows rather than pattern-matching them, so PyYAML is
+      # a hard dependency. Use a managed interpreter: Ubuntu's system Python is
+      # PEP 668 externally-managed, where a plain pip install fails.
+      - name: Set up Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: "3.12"
+
+      - name: Install the YAML parser
+        run: |
+          set -euo pipefail
+          python -m pip install --quiet --disable-pip-version-check pyyaml
+          python -c 'import yaml; print("PyYAML", yaml.__version__)'
+
+      - name: Audit workflow structure
+        shell: python
+        env:
+          STRICT: ${{ inputs.strict && 'true' || 'false' }}
+        run: |
+          """Structural audit of .github/workflows.
+
+          Blocking:  a job that is a required merge gate but runs no real command.
+          Advisory:  mutable action references, missing permissions blocks,
+                     missing job timeouts, secrets interpolated into run scripts.
+          """
+          import os
+          import re
+          import sys
+          from pathlib import Path
+
+          import yaml
+
+          STRICT = os.environ.get("STRICT") == "true"
+          GATE_NAMES = {"ci summary", "ci-summary"}
+          SHA_REF = re.compile(r"^[0-9a-f]{40}$")
+          NEEDS_REF = re.compile(r"needs\.[A-Za-z0-9_-]+\.(result|outputs)")
+          SECRET_REF = re.compile(r"\$\{\{\s*secrets\.[A-Za-z0-9_]+\s*\}\}")
+          # Commands that cannot make a gate meaningful on their own. Matched as
+          # whole words, so 'truncate_logs' is not mistaken for 'true'.
+          INERT_COMMANDS = {
+              "echo", "printf", "true", ":", "set", "cd", "export", "shift", "sleep",
+          }
+          SHELL_SPLIT = re.compile(r"&&|\|\||;|\|")
+          COMMAND_WORD = re.compile(r"^([A-Za-z_:.\[][A-Za-z0-9_.\-]*)")
+          BLOCK_NOISE = {"fi", "done", "esac", "then", "else", "do", "{", "}", "(", ")"}
+
+          blocking: list[str] = []
+          advisory: list[str] = []
+
+
+          def segment_is_inert(segment: str) -> bool:
+              """True when one command segment cannot fail the job."""
+              text = segment.strip().lstrip("{}()").strip()
+              if not text or text.startswith("#") or text in BLOCK_NOISE:
+                  return True
+              if re.fullmatch(r"exit\s+0", text):
+                  return True
+              if text.startswith("exit"):
+                  return False  # exit 1 and friends can fail the gate
+              word = COMMAND_WORD.match(text)
+              if not word:
+                  return True  # redirects, assignments, punctuation
+              return word.group(1) in INERT_COMMANDS
+
+
+          def real_commands(run: str) -> bool:
+              """True when a run block contains at least one command that can fail.
+
+              Each line is split on shell operators, because 'echo x && make verify'
+              starts with an inert word but still runs a real command.
+              """
+              for raw in run.splitlines():
+                  line = raw.strip()
+                  if not line or line.startswith("#"):
+                      continue
+                  if not all(segment_is_inert(s) for s in SHELL_SPLIT.split(line)):
+                      return True
+              return False
+
+
+          def is_fake_gate(job: dict) -> bool:
+              """A merge gate that aggregates nothing and runs nothing that can fail."""
+              serialized = yaml.safe_dump(job)
+              if NEEDS_REF.search(serialized):
+                  return False  # aggregates other jobs' results
+              steps = job.get("steps") or []
+              if not steps:
+                  return True
+              for step in steps:
+                  if not isinstance(step, dict):
+                      continue
+                  run = step.get("run")
+                  if isinstance(run, str) and real_commands(run):
+                      return False
+              return True
+
+
+          paths = sorted(
+              p for pat in ("*.yml", "*.yaml") for p in Path(".github/workflows").glob(pat)
+          )
+          for path in paths:
+              try:
+                  doc = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+              except (yaml.YAMLError, UnicodeDecodeError) as exc:
+                  blocking.append(f"::error file={path}::Unable to parse workflow: {exc}")
+                  continue
+              if not isinstance(doc, dict):
+                  continue
+
+              if "permissions" not in doc:
+                  advisory.append(
+                      f"::warning file={path}::No top-level permissions block; "
+                      "the job inherits the repository default. Add an explicit "
+                      "least-privilege permissions block."
+                  )
+
+              for name, job in (doc.get("jobs") or {}).items():
+                  if not isinstance(job, dict):
+                      continue
+                  label = str(job.get("name") or name).strip().lower()
+
+                  if label in GATE_NAMES and is_fake_gate(job):
+                      blocking.append(
+                          f"::error file={path}::Job '{name}' is a required merge gate "
+                          "but runs no command that can fail. A gate must aggregate "
+                          "other jobs via needs.<job>.result or run real checks."
+                      )
+
+                  if "timeout-minutes" not in job and "uses" not in job:
+                      advisory.append(
+                          f"::warning file={path}::Job '{name}' has no timeout-minutes; "
+                          "a hung job can occupy a runner for six hours."
+                      )
+
+                  for step in job.get("steps") or []:
+                      if not isinstance(step, dict):
+                          continue
+                      ref = step.get("uses")
+                      if isinstance(ref, str) and not ref.startswith((".", "docker://")):
+                          _, _, version = ref.rpartition("@")
+                          if not SHA_REF.match(version):
+                              advisory.append(
+                                  f"::warning file={path}::Job '{name}' uses '{ref}' at a "
+                                  "mutable ref. Pin third-party actions to a full commit SHA."
+                              )
+                      run = step.get("run")
+                      if isinstance(run, str) and SECRET_REF.search(run):
+                          advisory.append(
+                              f"::warning file={path}::Job '{name}' interpolates a secret "
+                              "directly into a run script. Pass it through env: so the "
+                              "value is never rendered into the command line."
+                          )
+
+          for line in advisory:
+              print(line)
+          for line in blocking:
+              print(line)
+
+          summary = Path(os.environ["GITHUB_STEP_SUMMARY"])
+          with summary.open("a", encoding="utf-8") as fh:
+              fh.write("## Organization PR Baseline\n\n")
+              fh.write(f"- Workflows audited: **{len(paths)}**\n")
+              fh.write(f"- Blocking findings: **{len(blocking)}**\n")
+              fh.write(f"- Advisory findings: **{len(advisory)}**")
+              fh.write(" (failing this run)\n" if STRICT and advisory else "\n")
+
+          if blocking or (STRICT and advisory):
+              sys.exit(1)
+
+      - name: Scan the pull-request range for committed secrets
+        env:
+          BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+          HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          set -euo pipefail
+          if [ -n "${BASE:-}" ] && [ "$BASE" != "0000000000000000000000000000000000000000" ] \
+             && git rev-parse --verify "$BASE^{commit}" >/dev/null 2>&1 \
+             && git rev-parse --verify "$HEAD^{commit}" >/dev/null 2>&1; then
+            echo "Scanning ${BASE}..${HEAD}"
+            gitleaks git --log-opts="${BASE}..${HEAD}" --no-banner --verbose --redact
+          else
+            echo "::notice::No usable commit range; scanning full history."
+            gitleaks git --no-banner --verbose --redact
+          fi
