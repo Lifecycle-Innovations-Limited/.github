@@ -15,9 +15,9 @@ name: Organization PR Baseline
 #               annotate until a repository opts in with strict: true.
 
 on:
+  # No paths filter: the secret scan must see every pull request, not only the
+  # ones that happen to touch a workflow file.
   pull_request:
-    paths:
-      - ".github/workflows/**"
   workflow_call:
     inputs:
       strict:
@@ -89,12 +89,19 @@ jobs:
             actionlint "${workflows[@]}"
           fi
 
-      - name: Ensure the YAML parser is present
+      # The audit parses workflows rather than pattern-matching them, so PyYAML is
+      # a hard dependency. Use a managed interpreter: Ubuntu's system Python is
+      # PEP 668 externally-managed, where a plain pip install fails.
+      - name: Set up Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: "3.12"
+
+      - name: Install the YAML parser
         run: |
           set -euo pipefail
-          # The audit step parses workflows rather than pattern-matching them, so
-          # PyYAML is a hard dependency. Do not rely on it being preinstalled.
-          python3 -c 'import yaml' 2>/dev/null || pip install --quiet --disable-pip-version-check pyyaml
+          python -m pip install --quiet --disable-pip-version-check pyyaml
+          python -c 'import yaml; print("PyYAML", yaml.__version__)'
 
       - name: Audit workflow structure
         shell: python
@@ -119,27 +126,45 @@ jobs:
           SHA_REF = re.compile(r"^[0-9a-f]{40}$")
           NEEDS_REF = re.compile(r"needs\.[A-Za-z0-9_-]+\.(result|outputs)")
           SECRET_REF = re.compile(r"\$\{\{\s*secrets\.[A-Za-z0-9_]+\s*\}\}")
-          # Commands that cannot make a gate meaningful on their own.
-          INERT = re.compile(
-              r"^(echo|printf|true|:|exit\s+0|set\s|cd\s|export\s|shift|sleep\s|#)",
-              re.IGNORECASE,
-          )
+          # Commands that cannot make a gate meaningful on their own. Matched as
+          # whole words, so 'truncate_logs' is not mistaken for 'true'.
+          INERT_COMMANDS = {
+              "echo", "printf", "true", ":", "set", "cd", "export", "shift", "sleep",
+          }
+          SHELL_SPLIT = re.compile(r"&&|\|\||;|\|")
+          COMMAND_WORD = re.compile(r"^([A-Za-z_:.\[][A-Za-z0-9_.\-]*)")
+          BLOCK_NOISE = {"fi", "done", "esac", "then", "else", "do", "{", "}", "(", ")"}
 
           blocking: list[str] = []
           advisory: list[str] = []
 
 
+          def segment_is_inert(segment: str) -> bool:
+              """True when one command segment cannot fail the job."""
+              text = segment.strip().lstrip("{}()").strip()
+              if not text or text.startswith("#") or text in BLOCK_NOISE:
+                  return True
+              if re.fullmatch(r"exit\s+0", text):
+                  return True
+              if text.startswith("exit"):
+                  return False  # exit 1 and friends can fail the gate
+              word = COMMAND_WORD.match(text)
+              if not word:
+                  return True  # redirects, assignments, punctuation
+              return word.group(1) in INERT_COMMANDS
+
+
           def real_commands(run: str) -> bool:
-              """True when a run block contains at least one command that can fail."""
+              """True when a run block contains at least one command that can fail.
+
+              Each line is split on shell operators, because 'echo x && make verify'
+              starts with an inert word but still runs a real command.
+              """
               for raw in run.splitlines():
                   line = raw.strip()
                   if not line or line.startswith("#"):
                       continue
-                  # Strip shell noise that wraps a real command.
-                  line = re.sub(r"^[{}()]\s*", "", line)
-                  if line in {"fi", "done", "esac", "}", "{"}:
-                      continue
-                  if not INERT.match(line):
+                  if not all(segment_is_inert(s) for s in SHELL_SPLIT.split(line)):
                       return True
               return False
 
