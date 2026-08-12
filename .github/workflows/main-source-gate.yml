@@ -1,0 +1,31 @@
+name: Main source gate
+
+# Required org-wide via ruleset on HealifyCore repos: PRs into main
+# may only come from the dev branch of the same repository.
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened, edited]
+
+permissions: {}
+
+jobs:
+  main-source-gate:
+    name: PR to main must come from dev
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check source branch
+        env:
+          HEAD_REF: ${{ github.head_ref }}
+          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+          BASE_REPO: ${{ github.repository }}
+        run: |
+          if [ "$HEAD_REPO" != "$BASE_REPO" ]; then
+            echo "::error::PRs to main must come from this repository's dev branch, not a fork ($HEAD_REPO)."
+            exit 1
+          fi
+          if [ "$HEAD_REF" != "dev" ]; then
+            echo "::error::PRs to main must come from dev. This PR is from '$HEAD_REF'. Merge it into dev first; dev syncs to main."
+            exit 1
+          fi
+          echo "OK: PR into main comes from dev."
