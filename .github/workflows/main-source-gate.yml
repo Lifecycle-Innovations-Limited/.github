@@ -12,7 +12,7 @@ permissions: {}
 jobs:
   main-source-gate:
     name: PR to main must come from dev
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, aws]
     steps:
       - name: Check source branch
         env:
