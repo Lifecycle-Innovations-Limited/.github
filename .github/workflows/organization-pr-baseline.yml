@@ -103,6 +103,15 @@ jobs:
           python -m pip install --quiet --disable-pip-version-check pyyaml
           python -c 'import yaml; print("PyYAML", yaml.__version__)'
 
+      # The fleet label contract: a self-hosted job without a fleet label
+      # matches no scale-up queue, so it never spawns its own runner and can
+      # sit queued until the 24-hour timeout. Blocking, because the failure
+      # mode is silent and expensive.
+      - name: Enforce the fleet label contract
+        run: |
+          set -euo pipefail
+          python scripts/fleet-label-guard.py .github/workflows
+
       - name: Audit workflow structure
         shell: python
         env:
