@@ -1,0 +1,20 @@
+# actionlint configuration for the organization .github repository.
+#
+# Workflows here run on the org's self-hosted AWS fleet, which uses custom
+# labels actionlint does not know about. Declaring them keeps actionlint's
+# runner-label check useful (typos in well-known labels still fail) instead of
+# flagging every legitimate self-hosted job.
+#
+# Mirrors the fleet labels in use across HealifyCore repos:
+#   [self-hosted, Linux, aws]        - ephemeral AWS Linux runners
+#   [self-hosted, macOS, ARM64, macbook-pro, sfmbp] - shared Mac runner
+# Keep this list in sync when a new custom label is introduced.
+self-hosted-runner:
+  labels:
+    - aws
+    - X64
+    - Linux
+    - macOS
+    - ARM64
+    - macbook-pro
+    - sfmbp
