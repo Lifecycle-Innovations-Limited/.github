@@ -1,7 +1,18 @@
 name: Main source gate
 
-# Required org-wide via ruleset on HealifyCore repos: PRs into main
-# may only come from the dev branch of the same repository.
+# Required org-wide via ruleset on HealifyCore repos (custom property
+# HealifyCore=healifycore): PRs into main may only come from the dev branch of
+# the same repository.
+#
+# Runner: self-hosted AWS fleet (runner group aws-ephemeral-private, label
+# [self-hosted, Linux, aws]). Was `ubuntu-latest`, which is GitHub-hosted and
+# blocked by the org's Actions spending limit: the job never started and
+# reported `failure` (annotation: "The job was not started because recent
+# account payments have failed or your spending limit needs to be increased").
+# That made this required check fail intermittently and blocked every dev -> main
+# promotion on 2026-10-15/16/17 while it could not actually run. All nine
+# HealifyCore repos are in that runner group, so the self-hosted fleet is
+# available to every repo this gate applies to. 2026-10-17.
 on:
   pull_request:
     branches: [main]
@@ -12,7 +23,7 @@ permissions: {}
 jobs:
   main-source-gate:
     name: PR to main must come from dev
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, aws]
     steps:
       - name: Check source branch
         env:
