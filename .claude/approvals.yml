@@ -1,0 +1,106 @@
+# Claude Approvals reads this file only from the repository's default branch
+# (main). A copy on any other branch, including dev, does not take effect.
+# Merge this file to main before expecting the check to follow it.
+#
+# There is no mode line, so the policy is enforced (enforce is the default).
+# The author counts as one seat. seats: 2 means one person besides the author.
+#
+# The routine rule below names claude/code_review inside an override if, so a
+# pull request that matches that rule can start a billed Code Review when it
+# opens and at each push. Listing the same classifier under advisory does not
+# by itself add reviews beyond the repository's Code Review settings; it keeps
+# automatic reviews from stopping on files that only match a rule which names it.
+#
+# This file cannot read CI results. CI green, resolved review threads, a clean
+# merge, and a Linear ticket stay on GitHub required checks and the merge queue.
+version: 1
+rules:
+  - purpose: "CI, deploy, infra, database migrations, and reviewer-instruction files take two people. No override applies."
+    paths:
+      - ".github/**"
+      - ".claude/**"
+      - "**/.claude/**"
+      - "ci/**"
+      - "scripts/ci*"
+      - "scripts/ci*/**"
+      - "deploy/**"
+      - "infra/**"
+      - "terraform/**"
+      - "**/*.tf"
+      - "cdk/**"
+      - "fastlane/**"
+      - "ExportOptions*.plist"
+      - "**/ExportOptions*.plist"
+      - "*.xcconfig"
+      - "**/*.xcconfig"
+      - "Dockerfile*"
+      - "**/Dockerfile*"
+      - "docker-compose*"
+      - "**/docker-compose*"
+      - "buildspec*"
+      - "**/buildspec*"
+      - "serverless*"
+      - "**/serverless*"
+      - "vercel.json"
+      - "**/vercel.json"
+      - "wrangler.toml"
+      - "**/wrangler.toml"
+      - ".doppler*"
+      - "**/.doppler*"
+      - "**/*.entitlements"
+      - "**/migrations/**"
+      - "**/db/migrate/**"
+      - "CODEOWNERS"
+      - "CLAUDE.md"
+      - "AGENTS.md"
+      - ".mcp.json"
+      - "REVIEW.md"
+    nested: inherit
+    verdict: { claude: comments, seats: 2 }
+    advisory: [claude/code_review]
+  - purpose: "Any other change takes two people. When claude/code_review reads pass, one person is enough and Claude approves. The one-seat override does not match the protected paths above."
+    paths:
+      - "**"
+      - "!.github/**"
+      - "!.claude/**"
+      - "!**/.claude/**"
+      - "!ci/**"
+      - "!scripts/ci*"
+      - "!scripts/ci*/**"
+      - "!deploy/**"
+      - "!infra/**"
+      - "!terraform/**"
+      - "!**/*.tf"
+      - "!cdk/**"
+      - "!fastlane/**"
+      - "!ExportOptions*.plist"
+      - "!**/ExportOptions*.plist"
+      - "!*.xcconfig"
+      - "!**/*.xcconfig"
+      - "!Dockerfile*"
+      - "!**/Dockerfile*"
+      - "!docker-compose*"
+      - "!**/docker-compose*"
+      - "!buildspec*"
+      - "!**/buildspec*"
+      - "!serverless*"
+      - "!**/serverless*"
+      - "!vercel.json"
+      - "!**/vercel.json"
+      - "!wrangler.toml"
+      - "!**/wrangler.toml"
+      - "!.doppler*"
+      - "!**/.doppler*"
+      - "!**/*.entitlements"
+      - "!**/migrations/**"
+      - "!**/db/migrate/**"
+      - "!CODEOWNERS"
+      - "!CLAUDE.md"
+      - "!AGENTS.md"
+      - "!.mcp.json"
+      - "!REVIEW.md"
+    verdict: { claude: comments, seats: 2 }
+    override:
+      - if: "claude/code_review = pass"
+        verdict: { claude: approves, seats: 1 }
+    advisory: [claude/code_review]
