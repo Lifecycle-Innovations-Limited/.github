@@ -18,7 +18,7 @@ import yaml
 
 # Fleet labels that route to a real scale-up queue. Keep in sync with
 # /github-action-runners/ghr-ephemeral/webhook/runner-matcher-config.
-FLEET_LABELS = {"aws", "aws-large", "aws-od", "aws-arm", "aws-win"}
+FLEET_LABELS = {"aws", "aws-large", "aws-od", "aws-arm", "aws-win", "ci-mac-guard"}
 
 # The AWS ephemeral fleet is Linux only. A self-hosted job that names another
 # operating system (macOS, Windows) runs on a different runner and is out of
